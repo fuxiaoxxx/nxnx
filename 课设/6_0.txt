@@ -1,0 +1,249 @@
+from pymongo import MongoClient
+from pprint import pprint
+import numpy as np
+
+class GappedArray:
+    """
+    GappedArray 类实现了一个带有间隙的数组,用于高效地插入和管理键值对数据。
+    这种结构可用于B树的节点中存储键和值。
+    """
+
+    def __init__(self, size):
+        """
+        初始化 GappedArray。
+
+        :param size: 数组的大小
+        """
+        self.size = size
+        self.array = [None] * size  # 初始化一个指定大小的数组,所有元素为 None
+        self.gaps = [True] * size   # 跟踪数组中的间隙,初始时所有位置都是间隙
+
+    def insert(self, index, key, value):
+        """
+        在指定索引处插入键值对。如果该位置已有值,则创建一个间隙后再插入。
+
+        :param index: 要插入的索引位置
+        :param key: 要插入的键
+        :param value: 要插入的值
+        """
+        if self.gaps[index]:
+            # 如果指定位置是间隙,直接插入
+            self.array[index] = (key, value)
+            self.gaps[index] = False
+        else:
+            # 如果指定位置不是间隙,先创建间隙,然后插入
+            self.create_gap(index)
+            self.array[index] = (key, value)
+            self.gaps[index] = False
+
+    def create_gap(self, index):
+        """
+        在指定索引处创建一个间隙,通过将元素向右移动来实现。
+
+        :param index: 要创建间隙的索引位置
+        """
+        if self.gaps[index]:
+            # 如果已经是间隙,无需操作
+            return
+        # 从右向左移动元素,为新元素创造空间
+        for i in range(self.size - 1, index, -1):
+            self.array[i] = self.array[i - 1]
+            self.gaps[i] = self.gaps[i - 1]
+        self.gaps[index] = True  # 标记新创建的间隙
+
+    def search(self, key):
+        """
+        在数组中搜索指定的键,返回其索引。
+
+        :param key: 要搜索的键
+        :return: 如果找到,返回索引；否则返回 -1
+        """
+        for i, item in enumerate(self.array):
+            if item is not None and item[0] == key:
+                return i
+        return -1  # 未找到时返回 -1
+
+    def get(self, key):
+        """
+        根据键获取值。
+
+        :param key: 要查找的键
+        :return: 如果找到键,返回对应的值；否则返回 None
+        """
+        index = self.search(key)
+        if index != -1:
+            return self.array[index][1]
+        return None
+
+    def update(self, key, value):
+        """
+        更新指定键的值。
+
+        :param key: 要更新的键
+        :param value: 新的值
+        :return: 如果更新成功返回 True,否则返回 False
+        """
+        index = self.search(key)
+        if index != -1:
+            self.array[index] = (key, value)
+            return True
+        return False
+
+class AlexNode:
+    def __init__(self, is_leaf):
+        self.is_leaf = is_leaf
+        self.keys = []
+        self.children = []
+        self.model = None
+        self.gaps = []  # Gapped array to handle dynamic updates
+
+    def train_model(self):
+        if self.keys:
+            x = np.arange(len(self.keys))
+            y = np.array([key for key, _ in self.keys])
+            self.model = np.polyfit(x, y, 1)  # Simple linear regression
+
+    def predict_position(self, key):
+        if self.model is None:
+            return 0
+        return int(np.polyval(self.model, key))
+
+    def insert_in_gap(self, key, data):
+        for i in range(len(self.gaps)):
+            if self.gaps[i] is None:
+                self.gaps[i] = (key, data)
+                return
+        self.keys.append((key, data))
+        self.keys.sort(key=lambda x: x[0])
+
+class AlexTree:
+    def __init__(self):
+        self.root = AlexNode(True)
+
+    def insert(self, key, data):
+        node = self.root
+        while not node.is_leaf:
+            pos = node.predict_position(key)
+            if pos >= len(node.keys):
+                pos = len(node.keys) - 1
+            node = node.children[pos]
+        node.insert_in_gap(key, data)
+        if len(node.keys) + len([g for g in node.gaps if g]) > 2 * len(node.keys):       #如果长度大于了
+            self.split_node(node)
+
+    def split_node(self, node):
+        mid = len(node.keys) // 2
+        left_node = AlexNode(node.is_leaf)
+        right_node = AlexNode(node.is_leaf)
+        left_node.keys = node.keys[:mid]
+        right_node.keys = node.keys[mid:]
+        if not node.is_leaf:
+            left_node.children = node.children[:mid + 1]
+            right_node.children = node.children[mid + 1:]
+        if node == self.root:
+            self.root = AlexNode(False)
+            self.root.keys = [node.keys[mid]]
+            self.root.children = [left_node, right_node]
+        else:
+            parent = self.find_parent(self.root, node)
+            index = parent.children.index(node)
+            parent.keys.insert(index, node.keys[mid])
+            parent.children[index] = left_node
+            parent.children.insert(index + 1, right_node)
+        left_node.train_model()
+        right_node.train_model()
+
+    def find_parent(self, root, node):
+        if root.is_leaf or node in root.children:
+            return root
+        for child in root.children:
+            if node in child.children:
+                return child
+            parent = self.find_parent(child, node)
+            if parent:
+                return parent
+
+    def range_query(self, start_key, end_key):
+        return self._range_query(self.root, start_key, end_key)
+
+    def _range_query(self, node, start_key, end_key):
+        result = []
+        if node.is_leaf:
+            for key, data in node.keys:
+                if start_key <= key <= end_key:
+                    result.append(data)
+        else:
+            for i in range(len(node.keys)):
+                if start_key <= node.keys[i][0]:
+                    result += self._range_query(node.children[i], start_key, end_key)
+                if start_key <= node.keys[i][0] <= end_key:
+                    result.append(node.keys[i][1])
+            if node.keys and end_key >= node.keys[-1][0]:
+                result += self._range_query(node.children[-1], start_key, end_key)
+        return result
+
+# 连接到MongoDB
+mongo_client = MongoClient('mongodb://localhost:27017/')
+database = mongo_client['book_database']
+collection = database['book_collection']
+
+class BookAlexIndex:
+    def __init__(self):
+        self.index_by_year = AlexTree()
+        self.index_by_reviews = AlexTree()  # Two indexes
+
+    def insert_books(self):
+        for book in collection.find():
+            publish_year = book['出版时间']
+            self.index_by_year.insert(publish_year, book)
+
+    def query_books(self, start_year, end_year, min_reviews):
+        # First perform range query by publication year
+        result_by_year = self.index_by_year.range_query(start_year, end_year)
+        # Then filter results by review count
+        for book in result_by_year:
+            review_count = book['评论数量']
+            self.index_by_reviews.insert(review_count, book)
+        result = self.index_by_reviews.range_query(min_reviews, float('inf'))
+        return result
+
+# Initialize and insert data
+book_index = BookAlexIndex()
+book_index.insert_books()
+
+# Range query
+start_year = 1990
+end_year = 2020
+min_reviews = 50000
+books = book_index.query_books(start_year, end_year, min_reviews)
+
+# Sort by rating in descending order and output top ten
+sorted_books = sorted(books, key=lambda x: float(x['评分']), reverse=True)[:10]
+
+print("\n出版时间在1990和2020之间且评论数量大于50000的书籍按评分降序排序前十：")
+for book in sorted_books:
+    pprint(book)
+
+# Interactive interface
+if __name__ == "__main__":
+    while True:
+        print("请输入要进行的操作：(1、查询书籍详细信息  0、退出)")
+        choose = input()
+        if choose == '1':
+            print("请输入要查询的出版年份区间和最少评论数量（格式: 起始年份 结束年份 最少评论数量）:")
+            query_params = input().split()
+            if len(query_params) == 3:
+                start_year = int(query_params[0])
+                end_year = int(query_params[1])
+                min_reviews = int(query_params[2])
+                books = book_index.query_books(start_year, end_year, min_reviews)
+                sorted_books = sorted(books, key=lambda x: float(x['评分']), reverse=True)[:10]
+                print(f"\n出版时间在{start_year}和{end_year}年之间且评论数量大于{min_reviews}的书籍按评分降序排序前十：")
+                for book in sorted_books:
+                    pprint(book)
+            else:
+                print("输入格式错误，请重新输入")
+        elif choose == '0':
+            sys.exit()
+        else:
+            print("无效的选择，请重新输入")
